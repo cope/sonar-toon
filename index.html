@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SonarQube JSON Cleaner</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🧹</text></svg>">
+<style>
+  :root {
+    --bg: #12141a;
+    --panel: #1a1d25;
+    --border: #2c313d;
+    --fg: #d7dae0;
+    --muted: #7d8595;
+    --gutter-fg: #545c6b;
+    --accent: #5b9dd9;
+    --bad: #e06c75;
+    --lh: 20px;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.5 "Cascadia Code", "Consolas", monospace;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    background: var(--panel);
+  }
+  header h1 { font-size: 13px; font-weight: 600; margin: 0; }
+  header .stats { color: var(--muted); margin-left: auto; }
+  label.opt { color: var(--muted); display: flex; align-items: center; gap: 4px; cursor: pointer; }
+  button {
+    background: var(--panel);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 3px 10px;
+    font: inherit;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  main { flex: 1; display: flex; min-height: 0; }
+  section { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  section + section { border-left: 1px solid var(--border); }
+  .title {
+    padding: 5px 12px;
+    color: var(--muted);
+    border-bottom: 1px solid var(--border);
+  }
+  .editor { flex: 1; display: flex; min-height: 0; overflow: hidden; }
+  .gutter {
+    flex: none;
+    padding: 10px 8px 10px 12px;
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    color: var(--gutter-fg);
+    text-align: right;
+    white-space: pre;
+    overflow: hidden;
+    user-select: none;
+  }
+  textarea, pre {
+    flex: 1;
+    margin: 0;
+    padding: 10px 12px;
+    background: transparent;
+    color: var(--fg);
+    border: none;
+    outline: none;
+    overflow: auto;
+    white-space: pre;
+    tab-size: 2;
+  }
+  .gutter, textarea, pre {
+    font: 13px/var(--lh) "Cascadia Code", "Consolas", monospace;
+  }
+  textarea { resize: none; }
+  pre.error { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>SonarQube JSON Cleaner</h1>
+  <label class="opt"><input type="checkbox" id="minimal" checked> minimal</label>
+  <label class="opt"><input type="checkbox" id="groupByFile" checked> group by file</label>
+  <label class="opt"><input type="checkbox" id="keepFlows" checked> keep flows</label>
+  <label class="opt"><input type="checkbox" id="hideComplexity"> hide complexity</label>
+  <button id="sample">Load sample</button>
+  <button id="format">Format</button>
+  <button id="clear">Clear</button>
+  <button id="copy">Copy output</button>
+  <span class="stats" id="stats"></span>
+</header>
+<main>
+  <section>
+    <div class="title">Raw SonarQube JSON</div>
+    <div class="editor">
+      <div class="gutter" id="inputGutter">1</div>
+      <textarea id="input" spellcheck="false" autocomplete="off" placeholder="Paste the /api/issues/search response, a bare array of issues, or a single issue object..."></textarea>
+    </div>
+  </section>
+  <section>
+    <div class="title">Clean TOON</div>
+    <div class="editor">
+      <div class="gutter" id="outputGutter">1</div>
+      <pre id="output"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+const STORAGE_KEY = 'sonarJsonCleaner.options';
+const INPUT_KEY = 'sonarJsonCleaner.input';
+const INDENT = 4;
+
+const input = document.getElementById('input');
+const output = document.getElementById('output');
+const stats = document.getElementById('stats');
+const inputGutter = document.getElementById('inputGutter');
+const outputGutter = document.getElementById('outputGutter');
+const opts = {
+  minimal: document.getElementById('minimal'),
+  groupByFile: document.getElementById('groupByFile'),
+  keepFlows: document.getElementById('keepFlows'),
+  hideComplexity: document.getElementById('hideComplexity')
+};
+
+const COMPLEXITY_RULES = new Set(['S3776', 'S1541', 'S1067']);
+const COMPLEXITY_MESSAGE = /\b(cognitive|cyclomatic)\s+complexity\b|\bcomplexity\b.*\ballowed\b/i;
+
+function isComplexityIssue(issue) {
+  const id = String(issue.rule || '').split(':').pop();
+  if (COMPLEXITY_RULES.has(id)) return true;
+  return COMPLEXITY_MESSAGE.test(issue.message || '');
+}
+
+const SAMPLE = {
+  total: 1, p: 1, ps: 100,
+  paging: { pageIndex: 1, pageSize: 100, total: 1 },
+  effortTotal: 10,
+  issues: [{
+    key: "AZk1r2x3QmPl9vT0aBcD",
+    rule: "typescript:S6582",
+    severity: "MAJOR",
+    component: "acme-api:src/services/order.service.ts",
+    project: "acme-api",
+    line: 142,
+    hash: "b1946ac92492d2347c6235b4d2611184",
+    textRange: { startLine: 142, endLine: 142, startOffset: 8, endOffset: 41 },
+    flows: [{ locations: [{
+      component: "acme-api:src/services/order.service.ts",
+      textRange: { startLine: 140, endLine: 140, startOffset: 4, endOffset: 20 },
+      msg: "value assigned here"
+    }] }],
+    status: "OPEN",
+    message: "Prefer using an optional chain expression instead.",
+    effort: "5min",
+    debt: "5min",
+    author: "someone@example.com",
+    tags: ["es2020"],
+    creationDate: "2026-03-11T09:12:44+0000",
+    updateDate: "2026-06-02T11:00:01+0000",
+    type: "CODE_SMELL",
+    scope: "MAIN",
+    quickFixAvailable: true,
+    cleanCodeAttribute: "CLEAR",
+    cleanCodeAttributeCategory: "INTENTIONAL",
+    impacts: [{ softwareQuality: "MAINTAINABILITY", severity: "MEDIUM" }],
+    issueStatus: "OPEN"
+  }],
+  components: [
+    { key: "acme-api:src/services/order.service.ts", enabled: true, qualifier: "FIL",
+      name: "order.service.ts", longName: "src/services/order.service.ts",
+      path: "src/services/order.service.ts" },
+    { key: "acme-api", enabled: true, qualifier: "TRK", name: "acme-api", longName: "acme-api" }
+  ],
+  rules: [{ key: "typescript:S6582", name: "Prefer using optional chain expressions", lang: "ts", langName: "TypeScript", status: "READY" }],
+  users: [{ login: "someone@example.com", name: "Some One", active: true }],
+  facets: []
+};
+
+function loadOptions() {
+  let saved;
+  try {
+    saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  } catch {
+    saved = {};
+  }
+  for (const [name, el] of Object.entries(opts)) {
+    if (typeof saved[name] === 'boolean') el.checked = saved[name];
+  }
+}
+
+function saveOptions() {
+  const state = {};
+  for (const [name, el] of Object.entries(opts)) state[name] = el.checked;
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  } catch {}
+}
+
+let inputSaveTimer = null;
+
+function saveInput() {
+  clearTimeout(inputSaveTimer);
+  inputSaveTimer = setTimeout(() => {
+    try {
+      if (input.value) localStorage.setItem(INPUT_KEY, input.value);
+      else localStorage.removeItem(INPUT_KEY);
+    } catch {
+      localStorage.removeItem(INPUT_KEY);
+    }
+  }, 300);
+}
+
+function loadInput() {
+  try {
+    input.value = localStorage.getItem(INPUT_KEY) || '';
+  } catch {
+    input.value = '';
+  }
+}
+
+function renderGutter(gutter, text, target) {
+  const count = text ? text.split('\n').length : 1;
+  const numbers = [];
+  for (let i = 1; i <= count; i++) numbers.push(i);
+  gutter.textContent = numbers.join('\n');
+  gutter.scrollTop = target.scrollTop;
+}
+
+function isPrimitive(v) {
+  return v === null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
+}
+
+function encodeToonString(s) {
+  const bare = !/[",\n\r]/.test(s) &&
+    s.length > 0 &&
+    s.trim() === s &&
+    !/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(s) &&
+    !['true', 'false', 'null'].includes(s);
+  if (bare) return s;
+  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
+}
+
+function encodeToonScalar(v) {
+  if (v === null) return 'null';
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+  return encodeToonString(String(v));
+}
+
+function encodeToonKey(k) {
+  return /^[A-Za-z0-9_$.\-]+$/.test(k) ? k : encodeToonString(k);
+}
+
+function pad(depth) {
+  return '  '.repeat(depth);
+}
+
+function tabularFields(arr) {
+  if (!arr.length) return null;
+  let fields = null;
+  for (const row of arr) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) return null;
+    const keys = Object.keys(row);
+    if (!keys.length) return null;
+    if (!keys.every(k => isPrimitive(row[k]))) return null;
+    if (fields === null) fields = keys;
+    else if (fields.length !== keys.length || fields.some((f, i) => f !== keys[i])) return null;
+  }
+  return fields;
+}
+
+function writeToonArray(key, arr, depth, lines) {
+  const prefix = pad(depth) + key + '[' + arr.length + ']';
+  if (!arr.length) {
+    lines.push(prefix + ':');
+    return;
+  }
+  if (arr.every(isPrimitive)) {
+    lines.push(prefix + ': ' + arr.map(encodeToonScalar).join(','));
+    return;
+  }
+  const fields = tabularFields(arr);
+  if (fields) {
+    lines.push(prefix + '{' + fields.map(encodeToonKey).join(',') + '}:');
+    for (const row of arr) {
+      lines.push(pad(depth + 1) + fields.map(f => encodeToonScalar(row[f])).join(','));
+    }
+    return;
+  }
+  lines.push(prefix + ':');
+  for (const item of arr) writeToonListItem(item, depth + 1, lines);
+}
+
+function writeToonListItem(item, depth, lines) {
+  if (isPrimitive(item)) {
+    lines.push(pad(depth) + '- ' + encodeToonScalar(item));
+    return;
+  }
+  const sub = [];
+  if (Array.isArray(item)) writeToonArray('', item, depth + 1, sub);
+  else writeToonObject(item, depth + 1, sub);
+  if (!sub.length) {
+    lines.push(pad(depth) + '-');
+    return;
+  }
+  sub[0] = pad(depth) + '- ' + sub[0].slice(pad(depth + 1).length);
+  lines.push(...sub);
+}
+
+function writeToonEntry(key, value, depth, lines) {
+  const k = encodeToonKey(key);
+  if (isPrimitive(value)) {
+    lines.push(pad(depth) + k + ': ' + encodeToonScalar(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    writeToonArray(k, value, depth, lines);
+    return;
+  }
+  if (!Object.keys(value).length) {
+    lines.push(pad(depth) + k + ':');
+    return;
+  }
+  lines.push(pad(depth) + k + ':');
+  writeToonObject(value, depth + 1, lines);
+}
+
+function writeToonObject(obj, depth, lines) {
+  for (const [k, v] of Object.entries(obj)) writeToonEntry(k, v, depth, lines);
+}
+
+function toToon(value) {
+  const lines = [];
+  if (isPrimitive(value)) return encodeToonScalar(value);
+  if (Array.isArray(value)) writeToonArray('items', value, 0, lines);
+  else writeToonObject(value, 0, lines);
+  return lines.join('\n');
+}
+
+function alignRows(list) {
+  if (list.some(o => Object.values(o).some(v => !isPrimitive(v)))) return list;
+  const fields = [];
+  for (const o of list) {
+    for (const k of Object.keys(o)) if (!fields.includes(k)) fields.push(k);
+  }
+  return list.map(o => {
+    const row = {};
+    for (const f of fields) row[f] = f in o ? o[f] : '';
+    return row;
+  });
+}
+
+function toPath(component, componentMap) {
+  if (!component) return undefined;
+  const mapped = componentMap[component];
+  if (mapped) return mapped;
+  const colon = component.indexOf(':');
+  return colon === -1 ? component : component.slice(colon + 1);
+}
+
+function lineOf(issue) {
+  if (typeof issue.line === 'number') return issue.line;
+  const r = issue.textRange;
+  if (!r) return undefined;
+  return r.startLine;
+}
+
+function rangeOf(issue) {
+  const r = issue.textRange;
+  if (!r) return undefined;
+  const start = r.startLine, end = r.endLine;
+  if (start === undefined) return undefined;
+  if (end !== undefined && end !== start) return start + '-' + end;
+  return undefined;
+}
+
+function cleanFlows(issue, componentMap) {
+  if (!opts.keepFlows.checked || !Array.isArray(issue.flows)) return undefined;
+  const locations = [];
+  for (const flow of issue.flows) {
+    for (const loc of (flow.locations || [])) {
+      const entry = {};
+      const path = toPath(loc.component, componentMap);
+      if (path) entry.file = path;
+      if (loc.textRange && loc.textRange.startLine !== undefined) entry.line = loc.textRange.startLine;
+      if (loc.msg) entry.message = loc.msg;
+      if (Object.keys(entry).length) locations.push(entry);
+    }
+  }
+  if (!locations.length) return undefined;
+  const seen = new Set();
+  return locations.filter(l => {
+    const k = l.file + '|' + l.line + '|' + l.message;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+function cleanIssue(issue, componentMap, ruleMap, includeFile) {
+  const out = {};
+  if (includeFile) {
+    const file = toPath(issue.component, componentMap);
+    if (file) out.file = file;
+  }
+  const line = lineOf(issue);
+  if (line !== undefined) out.line = line;
+  const range = rangeOf(issue);
+  if (range) out.lines = range;
+  if (issue.rule) out.rule = issue.rule;
+  const ruleName = ruleMap[issue.rule];
+  if (ruleName) out.ruleName = ruleName;
+  if (issue.message) out.message = issue.message;
+  if (!opts.minimal.checked && issue.type) out.type = issue.type;
+  const status = issue.issueStatus || issue.status;
+  if (status && status !== 'OPEN') out.status = status;
+  if (issue.resolution) out.resolution = issue.resolution;
+  if (!opts.minimal.checked && issue.quickFixAvailable) out.quickFixAvailable = true;
+  const flows = cleanFlows(issue, componentMap);
+  if (flows) out.related = flows;
+  return out;
+}
+
+function extractIssues(data) {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.issues)) return data.issues;
+  if (data && Array.isArray(data.hotspots)) return data.hotspots;
+  if (data && (data.rule || data.message)) return [data];
+  return [];
+}
+
+function buildComponentMap(data) {
+  const map = {};
+  const components = (data && data.components) || [];
+  for (const c of components) {
+    if (!c || !c.key) continue;
+    if (c.path) map[c.key] = c.path;
+    else if (c.longName && c.qualifier === 'FIL') map[c.key] = c.longName;
+  }
+  return map;
+}
+
+function buildRuleMap(data) {
+  const map = {};
+  for (const r of ((data && data.rules) || [])) {
+    if (r && r.key && r.name) map[r.key] = r.name;
+  }
+  return map;
+}
+
+function clean(text) {
+  const data = JSON.parse(text);
+  const all = extractIssues(data);
+  const componentMap = buildComponentMap(data);
+  const ruleMap = buildRuleMap(data);
+
+  const issues = opts.hideComplexity.checked ? all.filter(i => !isComplexityIssue(i)) : all;
+  const hidden = all.length - issues.length;
+
+  if (!issues.length) return { result: { issues: [] }, count: 0, hidden };
+
+  if (!opts.groupByFile.checked) {
+    const list = alignRows(issues.map(i => cleanIssue(i, componentMap, ruleMap, true)));
+    return { result: { issueCount: list.length, issues: list }, count: list.length, hidden };
+  }
+
+  const byFile = new Map();
+  for (const issue of issues) {
+    const file = toPath(issue.component, componentMap) || '(unknown)';
+    if (!byFile.has(file)) byFile.set(file, []);
+    byFile.get(file).push(cleanIssue(issue, componentMap, ruleMap, false));
+  }
+  const files = [...byFile.entries()]
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([file, list]) => ({
+      file,
+      issues: alignRows(list.sort((a, b) => (a.line || 0) - (b.line || 0)))
+    }));
+
+  return {
+    result: { issueCount: issues.length, fileCount: files.length, files },
+    count: issues.length,
+    hidden
+  };
+}
+
+function render() {
+  const text = input.value.trim();
+  renderGutter(inputGutter, input.value, input);
+
+  if (!text) {
+    output.textContent = '';
+    output.classList.remove('error');
+    stats.textContent = '';
+    renderGutter(outputGutter, '', output);
+    return;
+  }
+  try {
+    const { result, count, hidden } = clean(text);
+    const toon = toToon(result);
+    output.textContent = toon;
+    output.classList.remove('error');
+    const before = text.length, after = toon.length;
+    const saved = before ? Math.round((1 - after / before) * 100) : 0;
+    stats.textContent = count + ' issues' +
+      (hidden ? ' (' + hidden + ' complexity hidden)' : '') + ' · ' +
+      before.toLocaleString() + ' → ' + after.toLocaleString() + ' chars (-' + saved + '%)';
+  } catch (e) {
+    output.textContent = 'Invalid JSON: ' + e.message;
+    output.classList.add('error');
+    stats.textContent = '';
+  }
+  renderGutter(outputGutter, output.textContent, output);
+}
+
+function formatInput() {
+  const text = input.value.trim();
+  if (!text) return false;
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return false;
+  }
+  const formatted = JSON.stringify(data, null, INDENT);
+  if (formatted === input.value) return false;
+  input.value = formatted;
+  return true;
+}
+
+input.addEventListener('input', () => { render(); saveInput(); });
+input.addEventListener('paste', () => {
+  setTimeout(() => { formatInput(); render(); saveInput(); }, 0);
+});
+input.addEventListener('scroll', () => { inputGutter.scrollTop = input.scrollTop; });
+output.addEventListener('scroll', () => { outputGutter.scrollTop = output.scrollTop; });
+Object.values(opts).forEach(o => o.addEventListener('change', () => { saveOptions(); render(); }));
+document.getElementById('clear').addEventListener('click', () => { input.value = ''; render(); saveInput(); });
+document.getElementById('sample').addEventListener('click', () => {
+  input.value = JSON.stringify(SAMPLE, null, INDENT);
+  render();
+  saveInput();
+});
+document.getElementById('format').addEventListener('click', () => {
+  const btn = document.getElementById('format');
+  if (formatInput()) { render(); saveInput(); }
+  else if (input.value.trim()) {
+    btn.textContent = 'Invalid JSON';
+    setTimeout(() => { btn.textContent = 'Format'; }, 1200);
+  }
+});
+document.getElementById('copy').addEventListener('click', async () => {
+  const btn = document.getElementById('copy');
+  try {
+    await navigator.clipboard.writeText(output.textContent);
+    btn.textContent = 'Copied';
+  } catch {
+    btn.textContent = 'Copy failed';
+  }
+  setTimeout(() => { btn.textContent = 'Copy output'; }, 1200);
+});
+
+loadOptions();
+loadInput();
+render();
+</script>
+</body>
+</html>
