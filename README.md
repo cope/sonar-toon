@@ -1,4 +1,4 @@
-# sonar-toon
+# Sonar-Toon: SonarQube JSON Cleaner
 
 **Turn bloated SonarQube JSON into lean TOON your LLM will actually read.**
 
